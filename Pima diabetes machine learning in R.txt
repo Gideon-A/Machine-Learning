@@ -1,0 +1,309 @@
+# Imported libraries
+library(tidyverse)
+library(caret)
+library(rpart)
+library(e1071) # pruning
+library(pROC)
+theme_set(theme_classic())
+library(GGally)
+library(FactoMineR)
+library(factoextra)
+library(MASS)
+library(ROSE)
+library(ggplot2)
+library(plotly)
+library(magrittr)
+
+# Loading of the data
+PimaIndiansDiabetes2 = read_csv("diabetes_pima.csv") # reclassed 1,0 to pos, neg
+pima.data = na.omit(PimaIndiansDiabetes2) # removing NAs (missing values)
+
+# Inspecting the data
+sample_n(pima.data, 5)
+
+g = ggplot(pima.data, aes(Outcome, fill="red"))
+g + geom_bar(colour="black") +
+    guides(fill=FALSE)
+
+# Dealing with imbalanced data
+table(pima.data$Outcome)
+
+# classes distribution
+prop.table(table(pima.data$Outcome))
+
+# shows a slight imbalance which could affect prediction accuracy
+
+
+pima.data_balanced_both = ovun.sample(Outcome ~ ., data = pima.data, method = "both", p=0.5, N=768, seed = 1)$data
+table(pima.data_balanced_both$Outcome)
+
+pima.data_balanced = ROSE(Outcome ~ ., data = pima.data, seed = 1)$data
+table(pima.data_balanced$Outcome)
+
+# new class distribution
+prop.table(table(pima.data_balanced_both$Outcome))
+
+
+# Splitting the data
+pima.data_balanced_both$Outcome %<>% factor # identifies Outcome feature as binary 
+
+sample_n(pima.data_balanced_both, 5)
+
+set.seed(123)
+training.samples = pima.data_balanced_both$Outcome %>%
+    createDataPartition(p = 0.8, list = FALSE) # 80% for building a predictive model and test set 20% for evaluating the model
+train.data = pima.data_balanced_both[training.samples, ]
+test.data = pima.data_balanced_both[-training.samples, ]
+
+sample_n(pima.data_balanced_both, 10) # sample of dataset
+
+# Stepwise logistic regression - feature selection
+full.model = glm(Outcome ~., data = train.data, family = binomial)
+coef(full.model) # logistic regression model produced, showing coefficients
+summary(full.model)
+
+# Make predictions
+probabilities = full.model %>% predict(test.data, type = "response")
+predicted.classes = ifelse(probabilities > 0.5, "pos", "neg")
+# Model accuracy
+mean(predicted.classes==test.data$Outcome)
+
+step.model = full.model %>% stepAIC(trace = FALSE)
+coef(step.model) # new logistic regression model produced, showing coefficients
+summary(step.model)
+
+# predictions
+probabilities = predict(step.model, test.data, type = "response")
+predicted.classes = ifelse(probabilities > 0.5, "pos", "neg")
+# Prediction accuracy
+observed.classes = test.data$Outcome
+mean(predicted.classes == observed.classes)
+
+# Splitting new dataset
+# creating new dataset with reduced features and splitting the new dataset
+pima.data_stepwise = dplyr::select(pima.data_balanced_both, -SkinThickness, -Age, -Insulin) # removing features
+pima.data_stepwise$Outcome %<>% factor # identifies Outcome feature as binary 
+sample_n(pima.data_stepwise, 3) # sample of dataset with less features
+
+# Split the reduced feature dataset into training and test set
+set.seed(123)
+training.samples = pima.data_stepwise$Outcome %>%
+    createDataPartition(p = 0.8, list = FALSE)
+train.data = pima.data_stepwise[training.samples, ]
+test.data = pima.data_stepwise[-training.samples, ]
+
+# Estimate preprocessing parameters
+preproc.param = train.data %>% 
+  preProcess(method = c("center", "scale")) # scaling standardisation
+
+# Transform the data using the estimated parameters
+train.transformed = preproc.param %>% predict(train.data)
+test.transformed = preproc.param %>% predict(test.data)
+
+Linear Discriminant analysis
+# fit the LDA model on the training set and make predictions on the test data
+library(MASS)
+# Fit LDA
+fit = lda(Outcome ~., data = train.transformed)
+
+# Make predictions on the test data
+predictions = predict(fit, test.transformed)
+prediction.probabilities = predictions$posterior[,2]
+predicted.classes = predictions$class
+observed.classes = test.transformed$Outcome
+
+# accuracy
+accuracy = mean(observed.classes == predicted.classes)
+accuracy
+
+error = mean(observed.classes != predicted.classes)
+error
+
+fit
+
+# confusion matrix
+
+# Confusion matrix, number of cases
+table(observed.classes, predicted.classes)
+
+# Confusion matrix, proportion of cases
+table(observed.classes, predicted.classes) %>%
+prop.table() %>% round(digits = 3)
+
+confusionMatrix(predicted.classes,as.factor(observed.classes))
+
+# ROC Curve
+res.roc = roc(observed.classes, prediction.probabilities)
+
+# Extracting results
+roc.data = data_frame(
+thresholds = res.roc$thresholds,
+sensitivity = res.roc$sensitivities,
+specificity = res.roc$specificities
+)
+# Get the probability threshold for specificity = 0.6
+roc.data %>% filter(specificity >= 0.6)
+
+# plot with best threshold with the highest sum sensitivity + specificity
+plot.roc(res.roc, print.auc = TRUE, print.thres = "best")
+
+# Decision tree
+# Pruned model
+
+set.seed(123)
+model2 = train(
+Outcome ~., data = train.transformed, method = "rpart",
+    # (Stackoverflow, 2017)
+trControl = trainControl("repeatedcv", number = 10, repeats = 3), # to set up 10-fold cross validation
+tuneLength = 5) # specifies number of possible cp values to look at. 
+# Complexity parameter (cp) places a penalty when there are too many splits in the tree
+
+
+# Plot model accuracy vs different cp's (complexity parameters)
+plot(model2)
+
+# optimal tuning parameter cp that maximises the cross-validation accuracy
+model2$bestTune
+
+# Plotting of final tree model
+par(xpd = NA) # Avoid clipping the text in some device
+plot(model2$finalModel)
+text(model2$finalModel, digits = 3)
+
+# fully grown tree showing all predictor variables in the data set.
+
+# Decision rules in the model
+model2$finalModel
+
+observed.classes = test.transformed$Outcome
+
+# Predictions on test data
+predicted.classes = model2 %>% predict(test.transformed)
+
+# Accuracy
+mean(predicted.classes == test.transformed$Outcome)
+
+# Error
+error = mean(observed.classes != predicted.classes)
+error
+
+# Confusion matrix, number of cases
+table(observed.classes, predicted.classes)
+
+# Confusion matrix, proportion of cases
+table(observed.classes, predicted.classes) %>%
+prop.table() %>% round(digits = 3)
+
+confusionMatrix(predicted.classes,as.factor(observed.classes))
+# (Stackoverflow, 2015)
+
+# Compute roc for roc curve
+res.roc = roc(observed.classes, as.numeric(predicted.classes))
+
+# extract results
+roc.data = data_frame(
+thresholds = res.roc$thresholds,
+sensitivity = res.roc$sensitivities,
+specificity = res.roc$specificities
+)
+# Get the probability threshold for specificity = 0.6
+roc.data %>% filter(specificity >= 0.6)
+
+# plot of best threshold with the highest sum sensitivity + specificity
+plot.roc(res.roc, print.auc = TRUE, print.thres = "best")
+
+# Random Forest (Ensemble)
+# Fit model on training set
+set.seed(123)
+model = train(
+Outcome ~., data = train.transformed, method = "rf",
+trControl = trainControl("cv", number = 10),
+importance = TRUE, 
+preProcess = c("center","scale"))
+
+# Best tuning parameter
+model$bestTune
+
+# Predictions on the test data
+predicted.classes = model %>% predict(test.transformed)
+head(predicted.classes)
+
+# Accuracy rate
+mean(predicted.classes == test.transformed$Outcome)
+
+observed.classes = test.transformed$Outcome
+
+# Confusion matrix, number of cases
+table(observed.classes, predicted.classes)
+
+# Confusion matrix, proportion of cases
+table(observed.classes, predicted.classes) %>%
+prop.table() %>% round(digits = 3)
+
+confusionMatrix(predicted.classes,as.factor(observed.classes))
+
+# Compute roc for roc curve
+
+res.roc = roc(observed.classes, as.numeric(predicted.classes))
+
+# Extract results
+roc.data = data_frame(
+thresholds = res.roc$thresholds,
+sensitivity = res.roc$sensitivities,
+specificity = res.roc$specificities
+)
+# {robability threshold for specificity = 0.6
+roc.data %>% filter(specificity >= 0.6)
+
+# plot of best threshold with the highest sum sensitivity + specificity
+plot.roc(res.roc, print.auc = TRUE, print.thres = "best")
+
+# K-nearest neighbor
+# Fit the model on the training set
+set.seed(123)
+model = train(
+Outcome ~., data = train.transformed, method = "knn",
+trControl = trainControl("cv", number = 10),
+preProcess = c("center","scale"), # to normalise the data
+tuneLength = 20
+)
+
+# Plot model accuracy vs different k values
+plot(model)
+
+# Printing the optimal tuning parameter k that maximizes model accuracy
+model$bestTune
+
+# Predictions on  test data
+predicted.classes = model %>% predict(test.transformed)
+head(predicted.classes)
+
+# Accuracy
+mean(predicted.classes == test.transformed$Outcome)
+
+observed.classes = test.transformed$Outcome
+
+# Confusion matrix, number of cases
+table(observed.classes, predicted.classes)
+
+# Confusion matrix, proportion of cases
+table(observed.classes, predicted.classes) %>%
+prop.table() %>% round(digits = 3)
+
+confusionMatrix(predicted.classes,as.factor(observed.classes))
+
+# Computing roc
+
+res.roc = roc(observed.classes, as.numeric(predicted.classes))
+
+# Extracting results
+roc.data = data_frame(
+thresholds = res.roc$thresholds,
+sensitivity = res.roc$sensitivities,
+specificity = res.roc$specificities
+)
+# Probability threshold for specificity = 0.6
+roc.data %>% filter(specificity >= 0.6)
+
+# plot of best threshold with the highest sum sensitivity + specificity
+plot.roc(res.roc, print.auc = TRUE, print.thres = "best")
